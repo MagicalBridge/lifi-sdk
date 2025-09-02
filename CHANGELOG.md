@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [3.12.0](https://github.com/lifinance/sdk/compare/v3.11.4...v3.12.0) (2025-09-02)
+
+
+### Features
+
+* **api:** support quotes to amount ([#265](https://github.com/lifinance/sdk/issues/265)) ([db6871f](https://github.com/lifinance/sdk/commit/db6871f110805760e0fc8989460b412b6aece690))
+
+
+### Bug Fixes
+
+* handle UnknownBundleIdError error ([#302](https://github.com/lifinance/sdk/issues/302)) ([642a1af](https://github.com/lifinance/sdk/commit/642a1af2d9d3a390c63cabcd9700402baf8eac10))
+* update process with transaction receipt links when it exists ([#303](https://github.com/lifinance/sdk/issues/303)) ([f6d23bf](https://github.com/lifinance/sdk/commit/f6d23bf9ebce6668c3ac308b7ff29fa5d8b69828))
+
+### [3.11.4](https://github.com/lifinance/sdk/compare/v3.11.3...v3.11.4) (2025-08-29)
+
+
+### Bug Fixes
+
+* add setAllowance export from setAllowance.js ([#301](https://github.com/lifinance/sdk/issues/301)) ([cf38abc](https://github.com/lifinance/sdk/commit/cf38abccf6becbfe7df871609f75c4e172d05532))
+
+### [3.11.3](https://github.com/lifinance/sdk/compare/v3.11.2...v3.11.3) (2025-08-28)
+
+### [3.11.2](https://github.com/lifinance/sdk/compare/v3.11.1...v3.11.2) (2025-08-28)
+
+### [3.11.1](https://github.com/lifinance/sdk/compare/v3.11.0...v3.11.1) (2025-08-28)
+
+## [3.11.0](https://github.com/lifinance/sdk/compare/v3.10.1...v3.11.0) (2025-08-27)
+
+
+### Features
+
+* improve message-based execution flow ([#300](https://github.com/lifinance/sdk/issues/300)) ([6605adc](https://github.com/lifinance/sdk/commit/6605adc0b415ce3d53bdb3712e5e06f40b760680))
+* update getTokens() and getTokenBalances() responses ([#298](https://github.com/lifinance/sdk/issues/298)) ([801bc6c](https://github.com/lifinance/sdk/commit/801bc6ccea73a0ede37ffa1848d72e21323c7325))
+
 ### [3.10.1](https://github.com/lifinance/sdk/compare/v3.10.0...v3.10.1) (2025-08-20)
 
 
