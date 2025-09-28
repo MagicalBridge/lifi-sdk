@@ -52,14 +52,14 @@ import { isGaslessStep, isRelayerStep } from './typeguards.js'
 import type { Call, WalletCallReceipt } from './types.js'
 import {
   convertExtendedChain,
+  getDomainChainId,
   getMaxPriorityFeePerGas,
-  isSaltMatchingChainId,
 } from './utils.js'
 import { waitForBatchTransactionReceipt } from './waitForBatchTransactionReceipt.js'
 import { waitForRelayedTransactionReceipt } from './waitForRelayedTransactionReceipt.js'
 import { waitForTransactionReceipt } from './waitForTransactionReceipt.js'
 
-export interface EVMStepExecutorOptions extends StepExecutorOptions {
+interface EVMStepExecutorOptions extends StepExecutorOptions {
   client: Client
 }
 
@@ -246,8 +246,14 @@ export class EVMStepExecutor extends BaseStepExecutor {
         id: stepBase.id,
       }
     } else {
-      const params = signedTypedData?.length
-        ? { ...stepBase, typedData: signedTypedData }
+      const filteredSignedTypedData = signedTypedData?.filter(
+        (item) => item.signature
+      )
+      const params = filteredSignedTypedData?.length
+        ? {
+            ...stepBase,
+            typedData: filteredSignedTypedData,
+          }
         : stepBase
       updatedStep = await getStepTransaction(params)
     }
@@ -575,12 +581,26 @@ export class EVMStepExecutor extends BaseStepExecutor {
         }
         this.statusManager.updateProcess(step, process.type, 'MESSAGE_REQUIRED')
         for (const typedData of intentTypedData) {
+          if (!this.allowUserInteraction) {
+            return step
+          }
+          const typedDataChainId =
+            getDomainChainId(typedData.domain) || fromChain.id
+          // Switch to the typed data's chain if needed
+          const updatedClient = await this.checkClient(
+            step,
+            process,
+            typedDataChainId
+          )
+          if (!updatedClient) {
+            return step
+          }
           const signature = await getAction(
-            this.client,
+            updatedClient,
             signTypedData,
             'signTypedData'
           )({
-            account: this.client.account!,
+            account: updatedClient.account!,
             primaryType: typedData.primaryType,
             domain: typedData.domain,
             types: typedData.types,
@@ -613,8 +633,7 @@ export class EVMStepExecutor extends BaseStepExecutor {
         const signedNativePermitTypedData = signedTypedData.find(
           (p) =>
             p.primaryType === 'Permit' &&
-            (p.domain.chainId === fromChain.id ||
-              isSaltMatchingChainId(p.domain.salt as Hex, fromChain.id))
+            getDomainChainId(p.domain) === fromChain.id
         )
         if (signedNativePermitTypedData) {
           transactionRequest.data = encodeNativePermitData(
