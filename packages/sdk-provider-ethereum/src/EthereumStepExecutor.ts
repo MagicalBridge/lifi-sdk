@@ -1,13 +1,16 @@
 import {
   BaseStepExecutor,
   checkBalance,
+  convertQuoteToRoute,
   type ExtendedChain,
+  getContractCallsQuote,
   getRelayerQuote,
   getStepTransaction,
   LiFiErrorCode,
   type LiFiStep,
   type LiFiStepExtended,
   type Process,
+  patchContractCalls,
   relayTransaction,
   type SDKClient,
   type SignedTypedData,
@@ -46,6 +49,7 @@ import {
   isAtomicReadyWalletRejectedUpgradeError,
   parseEthereumErrors,
 } from './errors/parseEthereumErrors.js'
+import { PatcherMagicNumber } from './permits/constants.js'
 import { encodeNativePermitData } from './permits/encodeNativePermitData.js'
 import { encodePermit2Data } from './permits/encodePermit2Data.js'
 import { isNativePermitValid } from './permits/isNativePermitValid.js'
@@ -54,20 +58,24 @@ import type { Call, WalletCallReceipt } from './types.js'
 import { convertExtendedChain } from './utils/convertExtendedChain.js'
 import { getActionWithFallback } from './utils/getActionWithFallback.js'
 import { getDomainChainId } from './utils/getDomainChainId.js'
+import { isContractCallStep } from './utils/isContractCallStep.js'
 import { isGaslessStep } from './utils/isGaslessStep.js'
 import { isRelayerStep } from './utils/isRelayerStep.js'
 import { isZeroAddress } from './utils/isZeroAddress.js'
 
 interface EthereumStepExecutorOptions extends StepExecutorOptions {
   client: Client
+  switchChain?: (chainId: number) => Promise<Client | undefined>
 }
 
 export class EthereumStepExecutor extends BaseStepExecutor {
   private client: Client
+  private switchChain?: (chainId: number) => Promise<Client | undefined>
 
   constructor(options: EthereumStepExecutorOptions) {
     super(options)
     this.client = options.client
+    this.switchChain = options.switchChain
   }
 
   // Ensure that we are using the right chain and wallet when executing transactions.
@@ -83,7 +91,7 @@ export class EthereumStepExecutor extends BaseStepExecutor {
       process,
       targetChainId ?? step.action.fromChainId,
       this.allowUserInteraction,
-      this.executionOptions
+      this.switchChain
     )
     if (updatedClient) {
       this.client = updatedClient
@@ -226,16 +234,105 @@ export class EthereumStepExecutor extends BaseStepExecutor {
 
   private prepareUpdatedStep = async (
     client: SDKClient,
-    viemClient: Client,
     step: LiFiStepExtended,
+    process: Process,
     signedTypedData?: SignedTypedData[]
   ) => {
     // biome-ignore lint/correctness/noUnusedVariables: destructuring
     const { execution, ...stepBase } = step
     const relayerStep = isRelayerStep(step)
     const gaslessStep = isGaslessStep(step)
+    const contractCallStep = isContractCallStep(step)
     let updatedStep: LiFiStep
-    if (relayerStep && gaslessStep) {
+    if (contractCallStep) {
+      const contractCallsResult =
+        await this.executionOptions?.getContractCalls?.({
+          fromAddress: stepBase.action.fromAddress!,
+          fromAmount: BigInt(stepBase.action.fromAmount),
+          fromChainId: stepBase.action.fromChainId,
+          fromTokenAddress: stepBase.action.fromToken.address,
+          slippage: stepBase.action.slippage,
+          toAddress: stepBase.action.toAddress,
+          toAmount: BigInt(stepBase.estimate.toAmount),
+          toChainId: stepBase.action.toChainId,
+          toTokenAddress: stepBase.action.toToken.address,
+        })
+
+      if (!contractCallsResult?.contractCalls?.length) {
+        throw new TransactionError(
+          LiFiErrorCode.TransactionUnprepared,
+          'Unable to prepare transaction. Contract calls are not found.'
+        )
+      }
+
+      if (contractCallsResult.patcher) {
+        const patchedContractCalls = await patchContractCalls(
+          client,
+          contractCallsResult.contractCalls.map((call) => ({
+            chainId: stepBase.action.toChainId,
+            fromTokenAddress: call.fromTokenAddress,
+            targetContractAddress: call.toContractAddress,
+            callDataToPatch: call.toContractCallData,
+            delegateCall: false,
+            patches: [
+              {
+                amountToReplace: PatcherMagicNumber.toString(),
+              },
+            ],
+          }))
+        )
+
+        contractCallsResult.contractCalls.forEach((call, index) => {
+          call.toContractAddress = patchedContractCalls[index].target
+          call.toContractCallData = patchedContractCalls[index].callData
+        })
+      }
+
+      /**
+       * Limitations of the retry logic for contract calls:
+       * - denyBridges and denyExchanges are not supported
+       * - allowBridges and allowExchanges are not supported
+       * - fee is not supported
+       * - toAmount is not supported
+       */
+      const contractCallQuote = await getContractCallsQuote(client, {
+        // Contract calls are enabled only when fromAddress is set
+        fromAddress: stepBase.action.fromAddress!,
+        fromChain: stepBase.action.fromChainId,
+        fromToken: stepBase.action.fromToken.address,
+        fromAmount: stepBase.action.fromAmount,
+        toChain: stepBase.action.toChainId,
+        toToken: stepBase.action.toToken.address,
+        contractCalls: contractCallsResult.contractCalls,
+        toFallbackAddress: stepBase.action.toAddress,
+        slippage: stepBase.action.slippage,
+      })
+
+      contractCallQuote.action.toToken = stepBase.action.toToken
+
+      const customStep = contractCallQuote.includedSteps?.find(
+        (step) => step.type === 'custom'
+      )
+      if (customStep && contractCallsResult?.contractTool) {
+        const toolDetails = {
+          key: contractCallsResult.contractTool.name,
+          name: contractCallsResult.contractTool.name,
+          logoURI: contractCallsResult.contractTool.logoURI,
+        }
+        customStep.toolDetails = toolDetails
+        contractCallQuote.toolDetails = toolDetails
+      }
+
+      const route = convertQuoteToRoute(contractCallQuote, {
+        adjustZeroOutputFromPreviousStep:
+          this.executionOptions?.adjustZeroOutputFromPreviousStep,
+      })
+
+      updatedStep = {
+        ...route.steps[0],
+        id: stepBase.id,
+      }
+    } else if (relayerStep && gaslessStep) {
       const updatedRelayedStep = await getRelayerQuote(client, {
         fromChain: stepBase.action.fromChainId,
         fromToken: stepBase.action.fromToken.address,
@@ -284,6 +381,22 @@ export class EthereumStepExecutor extends BaseStepExecutor {
 
     let transactionRequest: TransactionParameters | undefined
     if (step.transactionRequest) {
+      // Only call checkClient for local accounts when we need to get maxPriorityFeePerGas
+      let maxPriorityFeePerGas: bigint | undefined
+      if (this.client.account?.type === 'local') {
+        const updatedClient = await this.checkClient(step, process)
+        if (!updatedClient) {
+          return null
+        }
+        maxPriorityFeePerGas = await getMaxPriorityFeePerGas(
+          client,
+          updatedClient
+        )
+      } else {
+        maxPriorityFeePerGas = step.transactionRequest.maxPriorityFeePerGas
+          ? BigInt(step.transactionRequest.maxPriorityFeePerGas)
+          : undefined
+      }
       transactionRequest = {
         chainId: step.transactionRequest.chainId,
         to: step.transactionRequest.to,
@@ -301,12 +414,7 @@ export class EthereumStepExecutor extends BaseStepExecutor {
         // maxFeePerGas: step.transactionRequest.maxFeePerGas
         //   ? BigInt(step.transactionRequest.maxFeePerGas as string)
         //   : undefined,
-        maxPriorityFeePerGas:
-          viemClient.account?.type === 'local'
-            ? await getMaxPriorityFeePerGas(client, viemClient)
-            : step.transactionRequest.maxPriorityFeePerGas
-              ? BigInt(step.transactionRequest.maxPriorityFeePerGas)
-              : undefined,
+        maxPriorityFeePerGas,
       }
     }
 
@@ -335,20 +443,18 @@ export class EthereumStepExecutor extends BaseStepExecutor {
 
   private estimateTransactionRequest = async (
     client: SDKClient,
-    transactionRequest: TransactionParameters,
-    fromChain: ExtendedChain
+    viemClient: Client,
+    transactionRequest: TransactionParameters
   ) => {
-    // Target address should be the Permit2 proxy contract in case of native permit or Permit2
-    transactionRequest.to = fromChain.permit2Proxy
     try {
       // Try to re-estimate the gas due to additional Permit data
       const estimatedGas = await getActionWithFallback(
         client,
-        this.client,
+        viemClient,
         estimateGas,
         'estimateGas',
         {
-          account: this.client.account!,
+          account: viemClient.account!,
           to: transactionRequest.to as Address,
           data: transactionRequest.data as Hex,
           value: transactionRequest.value,
@@ -444,7 +550,8 @@ export class EthereumStepExecutor extends BaseStepExecutor {
       !disableMessageSigning &&
       // Approval address is not required for Permit2 per se, but we use it to skip allowance checks for direct transfers
       !!step.estimate.approvalAddress &&
-      !step.estimate.skipApproval
+      !step.estimate.skipApproval &&
+      !step.estimate.skipPermit
 
     const checkForAllowance =
       // No existing swap/bridge transaction is pending
@@ -532,20 +639,18 @@ export class EthereumStepExecutor extends BaseStepExecutor {
 
       await checkBalance(client, this.client.account!.address, step)
 
-      // Make sure that the client and chain is still correct
-      const updatedClient = await this.checkClient(step, process)
-      if (!updatedClient) {
+      // Try to prepare a new transaction request and update the step with typed data
+      const preparedStep = await this.prepareUpdatedStep(
+        client,
+        step,
+        process,
+        signedTypedData
+      )
+      if (!preparedStep) {
         return step
       }
 
-      // Try to prepare a new transaction request and update the step with typed data
-      let { transactionRequest, isRelayerTransaction } =
-        await this.prepareUpdatedStep(
-          client,
-          updatedClient,
-          step,
-          signedTypedData
-        )
+      let { transactionRequest, isRelayerTransaction } = preparedStep
 
       process = this.statusManager.updateProcess(
         step,
@@ -676,7 +781,7 @@ export class EthereumStepExecutor extends BaseStepExecutor {
             'MESSAGE_REQUIRED'
           )
           const permit2Signature = await signPermit2Message(client, {
-            client: this.client,
+            client: updatedClient,
             chain: fromChain,
             tokenAddress: step.action.fromToken.address as Address,
             amount: BigInt(step.action.fromAmount),
@@ -698,20 +803,22 @@ export class EthereumStepExecutor extends BaseStepExecutor {
         }
 
         if (signedNativePermitTypedData || permit2Supported) {
+          // Target address should be the Permit2 proxy contract in case of native permit or Permit2
+          transactionRequest.to = fromChain.permit2Proxy as Address
           transactionRequest = await this.estimateTransactionRequest(
             client,
-            transactionRequest,
-            fromChain
+            updatedClient,
+            transactionRequest
           )
         }
 
         txHash = await getAction(
-          this.client,
+          updatedClient,
           sendTransaction,
           'sendTransaction'
         )({
           to: transactionRequest.to as Address,
-          account: this.client.account!,
+          account: updatedClient.account!,
           data: transactionRequest.data as Hex,
           value: transactionRequest.value,
           gas: transactionRequest.gas,
